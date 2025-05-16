@@ -1,5 +1,3 @@
-Perfekt! Hier ist die vollständige **`README.md`-Datei** in **Markdown-Format**, die du direkt auf GitHub verwenden kannst:
-
 ---
 
 ````markdown
