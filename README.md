@@ -23,6 +23,8 @@ pip install requests
 > ✅ Hinweis: Du benötigst außerdem **FFmpeg**, um Musik abspielen zu können.
 > Lade es hier herunter: [https://ffmpeg.org/download.html](https://ffmpeg.org/download.html)
 > Und füge es deinem Systempfad hinzu.
+>
+> auser Benuzt Linux Dann brauch Es Nicht
 
 ---
 
