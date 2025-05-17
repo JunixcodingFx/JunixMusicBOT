@@ -1,7 +1,3 @@
-Klar! Hier ist deine überarbeitete `README.md`-Datei mit einem zusätzlichen Bildabschnitt, der zeigt, was bei einem Discord-Bot **in den Bot-Einstellungen im Discord Developer Portal** aktiviert sein sollte (z. B. Gateway-Intents, Message Content usw.).
-
----
-
 ````markdown
 # 🎵 Discord **JunixMusicBOT**
 
