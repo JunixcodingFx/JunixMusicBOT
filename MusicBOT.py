@@ -1,10 +1,12 @@
 import discord
 from discord.ext import commands
-import youtube_dl
-from typing import Optional
+import yt_dlp as youtube_dl
 import os
-import requests
 import json
+import requests
+import asyncio
+from collections import deque
+
 
 #==========Copyright==========
 
@@ -12,23 +14,22 @@ import json
 
 #Hilfe? Kein Problem! hier ist unser Email addrese: Hilfe@junixfx.de
 
-#oder Server: https://discord.gg/fUWBR2ym2f
+#oder Server: https://discord.gg/mW6YJ3GHfq
 
-#ihr könte die GITHUB REPO dektivieren und die Version manuell änder oder löscht das einfach :D
-#==========Copyright==========
+# Sie können das GitHub Repository deaktivieren und die Version manuell ändern, dies wird jedoch nicht empfohlen.
+# Aus Sicherheitsgründen und für automatische Updates sollten Sie das GitHub Repository aktiv lassen.
+# Eine Deaktivierung oder Entfernung des Repositories könnte zu Problemen und Sicherheitsrisiken führen.
+#==========Copyright-End==========
 
+# Bot Konfiguration
 intents = discord.Intents.default()
+intents.members = True 
 intents.message_content = True
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-Token = " Hier kommt der BOT Token rein "
-
-music_queue = []
+bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 # GitHub Auto-Updater Konfiguration
 GITHUB_REPO = "JunixcodingFx/JunixMusicBOT"
-CURRENT_VERSION = "1.0.0"
+CURRENT_VERSION = "2.0.0"
 AUTO_UPDATE_ENABLED = True  # Kann auf False gesetzt werden um Auto-Updates zu deaktivieren
 
 def check_for_updates():
@@ -49,355 +50,474 @@ def check_for_updates():
         print(f"Fehler beim Prüfen auf Updates: {str(e)}")
         return False
 
-# Erstelle Downloads-Ordner, falls nicht vorhanden
-if not os.path.exists('downloads'):
-    os.makedirs('downloads')
+# Musik-Queue System
+class MusicQueue:
+    def __init__(self):
+        self.queue = deque()
+        self.current_song = None
+        self.is_playing = False
+        self.volume = 1.0
 
-@bot.event
-async def on_ready():
-    print(f"Bot is ready and logged in as {bot.user}")
-    print(f"Aktuelle Version: {CURRENT_VERSION}")
-    print(f"Auto-Update ist {'aktiviert' if AUTO_UPDATE_ENABLED else 'deaktiviert'}")
-    
-    # Prüfe auf Updates beim Start
-    if check_for_updates():
-        print("Bitte aktualisiere den Bot auf die neueste Version!")
-        
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="!help"))
+    def add_song(self, song):
+        self.queue.append(song)
 
-#==========Commands==========
+    def get_next_song(self):
+        if self.queue:
+            return self.queue.popleft()
+        return None
 
-@bot.command(name="join", help="Tritt deinem Sprachkanal bei")
-async def join(ctx):
-    if not ctx.message.author.voice:
-        embed = discord.Embed(
-            title="Fehler", 
-            description="Du bist in keinem Sprachkanal",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=embed)
-        return
-        
-    channel = ctx.message.author.voice.channel
-    if ctx.voice_client is not None:
-        await ctx.voice_client.move_to(channel)
+# Queue für jeden Server
+queues = {}
+
+# ID System für Songs mit Verbesserter Fehlerbehandlung
+song_ids = {}
+
+def setup_music_directory():
+    if not os.path.exists('music'):
+        os.makedirs('music')
     else:
-        await channel.connect()
-        
-    embed = discord.Embed(
-        title="Erfolg", 
-        description=f"Sprachkanal beigetreten: {channel.name}",
-        color=discord.Color.green()
-    )
-    await ctx.send(embed=embed)
+        for filename in os.listdir('music'):
+            if filename.endswith('.mp3'):
+                song_id = str(len(song_ids) + 1).zfill(3)
+                song_ids[song_id] = filename
 
-@bot.command(name="leave", help="Verlässt den Sprachkanal")
-async def leave(ctx):
-    if not ctx.voice_client:
+def load_song_ids():
+    try:
+        if os.path.exists('song_ids.json'):
+            with open('song_ids.json', 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
         embed = discord.Embed(
-            title="Fehler",
-            description="Ich bin in keinem Sprachkanal",
+            title="❌ Fehler",
+            description=f"Fehler beim Laden der Song-IDs: {e}",
             color=discord.Color.red()
         )
-        await ctx.send(embed=embed)
-        return
-        
-    await ctx.voice_client.disconnect()
-    embed = discord.Embed(
-        title="Erfolg",
-        description="Sprachkanal verlassen",
-        color=discord.Color.green()
-    )
-    await ctx.send(embed=embed)
+        return {}
 
-@bot.command(name="play", help="Spielt ein Lied von YouTube URL oder Suchbegriff")
-async def play(ctx, *, query: str):
-    if not ctx.voice_client:
-        await join(ctx)
-        
-    if not ctx.voice_client:  # Falls Join fehlgeschlagen
-        return
-        
-    async with ctx.typing():
-        try:
-            # Erstelle eindeutigen Dateinamen
-            filename = f"downloads/{ctx.message.id}.mp3"
-            
-            player = await YTDLSource.create_source(ctx, query, loop=bot.loop, download_path=filename)
-            ctx.voice_client.play(
-                player,
-                after=lambda e: print(f'Player error: {e}') if e else os.remove(filename)
+def save_song_ids():
+    try:
+        with open('song_ids.json', 'w', encoding='utf-8') as f:
+            json.dump(song_ids, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        embed = discord.Embed(
+            title="❌ Fehler",
+            description=f"Fehler beim Speichern der Song-IDs: {e}",
+            color=discord.Color.red()
+        )
+
+def generate_song_id():
+    return str(len(song_ids) + 1).zfill(3)
+
+# Initialisierung
+setup_music_directory()
+song_ids = load_song_ids()
+
+# Verbesserte YouTube Download Optionen
+ydl_opts = {
+    'format': 'bestaudio/best',
+    'outtmpl': 'music/%(title)s.%(ext)s',
+    'postprocessors': [{
+        'key': 'FFmpegExtractAudio',
+        'preferredcodec': 'mp3',
+        'preferredquality': '192',
+    }],
+    'noplaylist': True,
+    'quiet': True,
+    'no_warnings': True,
+}
+
+async def play_next(ctx):
+    if ctx.guild.id not in queues:
+        queues[ctx.guild.id] = MusicQueue()
+    
+    queue = queues[ctx.guild.id]
+    if queue.queue:
+        next_song = queue.get_next_song()
+        if next_song:
+            source = discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(next_song['file']),
+                volume=queue.volume
             )
-
+            ctx.voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(
+                play_next(ctx), bot.loop).result() if e is None else ctx.send(embed=discord.Embed(
+                    title="❌ Fehler",
+                    description=f"Ein Fehler ist aufgetreten: {e}",
+                    color=discord.Color.red()
+                ))
+            )
             embed = discord.Embed(
-                title="Spielt jetzt",
-                description=f"[{player.title}]({player.web_url})\nHeruntergeladen als: {filename}",
+                title="🎵 Aktuelle Wiedergabe",
+                description=f"Spiele jetzt: {next_song['title']}",
                 color=discord.Color.green()
             )
             await ctx.send(embed=embed)
-        except Exception as e:
+
+@bot.event
+async def on_ready():
+    # Prüfe auf Updates beim Start
+    if check_for_updates():
+        embed = discord.Embed(
+            title="⚠️ Update verfügbar",
+            description="Bitte aktualisiere den Bot auf die neueste Version!",
+            color=discord.Color.gold()
+        )
+        
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="!help"))
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        embed = discord.Embed(
+            title="❌ Unbekannter Befehl",
+            description="Nutze `!hilfe` für eine Liste aller Befehle.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+    else:
+        embed = discord.Embed(
+            title="❌ Fehler",
+            description=f"Ein Fehler ist aufgetreten: {str(error)}",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+
+@bot.command()
+async def ping(ctx):
+    latency = bot.latency * 1000
+    embed = discord.Embed(
+        title="🏓 Pong!",
+        description=f'Latenz: {latency:.2f} ms',
+        color=discord.Color.green()
+    )
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def join(ctx):
+    if not ctx.author.voice:
+        embed = discord.Embed(
+            title="❌ Fehler",
+            description="Du musst in einem Sprachkanal sein!",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+    
+    if ctx.voice_client:
+        await ctx.voice_client.move_to(ctx.author.voice.channel)
+    else:
+        await ctx.author.voice.channel.connect()
+    
+    embed = discord.Embed(
+        title="✅ Erfolgreich beigetreten",
+        description=f"Bin dem Kanal '{ctx.author.voice.channel}' beigetreten!",
+        color=discord.Color.green()
+    )
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def play(ctx, *, query=None):
+    if not query:
+        embed = discord.Embed(
+            title="ℹ️ Verwendung",
+            description="Verwendung: `!play <Song-ID/URL/Suchbegriff>`",
+            color=discord.Color.blue()
+        )
+        await ctx.send(embed=embed)
+        return
+
+    if not ctx.voice_client:
+        if ctx.author.voice:
+            await ctx.author.voice.channel.connect()
+        else:
             embed = discord.Embed(
-                title="Fehler",
-                description=f"Ein Fehler ist aufgetreten: {str(e)}",
+                title="❌ Fehler",
+                description="Du musst in einem Sprachkanal sein!",
                 color=discord.Color.red()
             )
             await ctx.send(embed=embed)
+            return
 
-@bot.command(name="stop", help="Stoppt die Wiedergabe und leert die Warteschlange")
+    if ctx.guild.id not in queues:
+        queues[ctx.guild.id] = MusicQueue()
+
+    try:
+        # URL oder Suche
+        if query.startswith(('http://', 'https://', 'www.')):
+            with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(query, download=True)
+                filename = ydl.prepare_filename(info).replace('.webm', '.mp3').replace('.m4a', '.mp3')
+                song_id = generate_song_id()
+                song_ids[song_id] = os.path.basename(filename)
+                save_song_ids()
+                
+                song_info = {
+                    'file': filename,
+                    'title': info['title'],
+                    'id': song_id
+                }
+                
+                queues[ctx.guild.id].add_song(song_info)
+                
+                embed = discord.Embed(
+                    title="✅ Song hinzugefügt",
+                    description=f"Zur Warteschlange hinzugefügt: {info['title']} (ID: {song_id})",
+                    color=discord.Color.green()
+                )
+                await ctx.send(embed=embed)
+                
+                if not ctx.voice_client.is_playing():
+                    await play_next(ctx)
+        
+        # Song-ID
+        elif query in song_ids:
+            filename = os.path.join('music', song_ids[query])
+            if os.path.exists(filename):
+                song_info = {
+                    'file': filename,
+                    'title': song_ids[query],
+                    'id': query
+                }
+                queues[ctx.guild.id].add_song(song_info)
+                
+                embed = discord.Embed(
+                    title="✅ Song hinzugefügt",
+                    description=f"Zur Warteschlange hinzugefügt: {song_ids[query]}",
+                    color=discord.Color.green()
+                )
+                await ctx.send(embed=embed)
+                
+                if not ctx.voice_client.is_playing():
+                    await play_next(ctx)
+            else:
+                embed = discord.Embed(
+                    title="❌ Fehler",
+                    description="Datei nicht gefunden!",
+                    color=discord.Color.red()
+                )
+                await ctx.send(embed=embed)
+        else:
+            embed = discord.Embed(
+                title="❌ Fehler",
+                description="Ungültige Song-ID oder URL!",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+            
+    except Exception as e:
+        embed = discord.Embed(
+            title="❌ Fehler",
+            description=f"Ein Fehler ist aufgetreten: {str(e)}",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+
+@bot.command()
 async def stop(ctx):
     if not ctx.voice_client or not ctx.voice_client.is_playing():
         embed = discord.Embed(
-            title="Fehler",
-            description="Es wird nichts abgespielt",
+            title="❌ Fehler",
+            description="Es wird gerade nichts abgespielt!",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
         return
-        
+    
     ctx.voice_client.stop()
-    music_queue.stop()
+    queues[ctx.guild.id].queue.clear()
+    
     embed = discord.Embed(
-        title="Erfolg",
-        description="Wiedergabe gestoppt und Warteschlange geleert",
-        color=discord.Color.green()
+        title="⏹️ Wiedergabe gestoppt",
+        description="Wiedergabe gestoppt und Warteschlange geleert!",
+        color=discord.Color.blue()
     )
     await ctx.send(embed=embed)
 
-@bot.command(name="resume", help="Setzt die Wiedergabe fort")
-async def resume(ctx):
+@bot.command()
+async def skip(ctx):
+    if not ctx.voice_client or not ctx.voice_client.is_playing():
+        embed = discord.Embed(
+            title="❌ Fehler",
+            description="Es wird gerade nichts abgespielt!",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+    
+    ctx.voice_client.stop()
+    
+    embed = discord.Embed(
+        title="⏭️ Song übersprungen",
+        description="Song wurde übersprungen!",
+        color=discord.Color.blue()
+    )
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def volume(ctx, vol: int = None):
+    if vol is None:
+        embed = discord.Embed(
+            title="ℹ️ Verwendung",
+            description="Verwendung: `!volume <0-100>`",
+            color=discord.Color.blue()
+        )
+        await ctx.send(embed=embed)
+        return
+        
     if not ctx.voice_client:
         embed = discord.Embed(
-            title="Fehler",
-            description="Ich bin in keinem Sprachkanal",
+            title="❌ Fehler",
+            description="Ich bin in keinem Sprachkanal!",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
         return
         
-    if not ctx.voice_client.is_paused():
+    if not 0 <= vol <= 100:
         embed = discord.Embed(
-            title="Fehler",
-            description="Nicht pausiert",
+            title="❌ Fehler",
+            description="Lautstärke muss zwischen 0 und 100 liegen!",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
         return
-        
-    ctx.voice_client.resume()
+
+    queues[ctx.guild.id].volume = vol / 100
+    if ctx.voice_client.source:
+        ctx.voice_client.source.volume = vol / 100
+    
     embed = discord.Embed(
-        title="Erfolg",
-        description="Wiedergabe fortgesetzt",
-        color=discord.Color.green()
+        title="🔊 Lautstärke angepasst",
+        description=f"Lautstärke auf {vol}% gesetzt!",
+        color=discord.Color.blue()
     )
     await ctx.send(embed=embed)
 
-@bot.command(name="pause", help="Pausiert das aktuelle Lied")
+@bot.command()
+async def list(ctx):
+    if not song_ids:
+        embed = discord.Embed(
+            title="ℹ️ Information",
+            description="Keine Songs in der Bibliothek!",
+            color=discord.Color.blue()
+        )
+        await ctx.send(embed=embed)
+        return
+        
+    embed = discord.Embed(
+        title="📚 Song-Bibliothek",
+        color=discord.Color.blue()
+    )
+    
+    songs_list = ""
+    for song_id, filename in song_ids.items():
+        songs_list += f"`{song_id}` - {filename}\n"
+        
+    # Teile die Liste auf, wenn sie zu lang ist
+    if len(songs_list) > 1024:
+        parts = [songs_list[i:i+1024] for i in range(0, len(songs_list), 1024)]
+        for i, part in enumerate(parts, 1):
+            embed.add_field(name=f"Seite {i}", value=part, inline=False)
+    else:
+        embed.description = songs_list
+        
+    await ctx.send(embed=embed)
+
+@bot.command()
 async def pause(ctx):
-    if not ctx.voice_client:
+    if not ctx.voice_client or not ctx.voice_client.is_playing():
         embed = discord.Embed(
-            title="Fehler",
-            description="Ich bin in keinem Sprachkanal",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=embed)
-        return
-        
-    if ctx.voice_client.is_paused():
-        embed = discord.Embed(
-            title="Fehler",
-            description="Bereits pausiert",
+            title="❌ Fehler",
+            description="Es wird gerade nichts abgespielt!",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
         return
         
     ctx.voice_client.pause()
+    
     embed = discord.Embed(
-        title="Erfolg",
-        description="Wiedergabe pausiert",
-        color=discord.Color.green()
-    )
-    await ctx.send(embed=embed)
-
-@bot.command(name="skip", help="Überspringt das aktuelle Lied")
-async def skip(ctx):
-    if not ctx.voice_client or not ctx.voice_client.is_playing():
-        embed = discord.Embed(
-            title="Fehler",
-            description="Es wird nichts abgespielt",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=embed)
-        return
-        
-    ctx.voice_client.stop()
-    music_queue.skip()
-    embed = discord.Embed(
-        title="Erfolg",
-        description="Lied übersprungen",
-        color=discord.Color.green()
-    )
-    await ctx.send(embed=embed)
-
-@bot.command(name="queue", help="Zeigt die aktuelle Warteschlange")
-async def queue(ctx):
-    queue_content = music_queue.get_queue()
-    if not queue_content:
-        queue_content = "Warteschlange ist leer"
-        
-    embed = discord.Embed(
-        title="Warteschlange",
-        description=queue_content,
-        color=discord.Color.green()
-    )
-    await ctx.send(embed=embed)
-
-@bot.command(name="clear", help="Leert die Warteschlange")
-async def clear(ctx):
-    music_queue.clear()
-    embed = discord.Embed(
-        title="Erfolg",
-        description="Warteschlange geleert",
-        color=discord.Color.green()
-    )
-    await ctx.send(embed=embed)
-
-@bot.command(name="remove", help="Entfernt ein Lied aus der Warteschlange nach Index")
-async def remove(ctx, index: Optional[int] = None):
-    if index is None:
-        embed = discord.Embed(
-            title="Fehler",
-            description="Bitte gib einen Index zum Entfernen an",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=embed)
-        return
-        
-    try:
-        music_queue.remove(index)
-        remove_song(index)
-        embed = discord.Embed(
-            title="Erfolg",
-            description=f"Lied an Position {index} aus der Warteschlange entfernt",
-            color=discord.Color.green()
-        )
-        await ctx.send(embed=embed)
-    except IndexError:
-        embed = discord.Embed(
-            title="Fehler",
-            description="Ungültiger Warteschlangenindex",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=embed)
-
-@bot.command(name="loop", help="Schaltet die Wiedergabe in den Loop-Modus um")
-async def loop(ctx):
-    if not ctx.voice_client or not ctx.voice_client.is_playing():
-        embed = discord.Embed(
-            title="Fehler",
-            description="Es wird nichts abgespielt",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=embed)
-        return
-        
-    ctx.voice_client.loop = not ctx.voice_client.loop
-    embed = discord.Embed(
-        title="Erfolg",
-        description="Loop-Modus aktiviert" if ctx.voice_client.loop else "Loop-Modus deaktiviert",
-        color=discord.Color.green()
-    )
-    await ctx.send(embed=embed)
-
-@bot.command(name="volume", help="Stellt die Lautstärke ein")
-async def volume(ctx, *, volume: Optional[int] = None):
-    if volume is None:
-        embed = discord.Embed(
-            title="Fehler",
-            description="Bitte gib eine Lautstärke zwischen 0 und 100 ein",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=embed)
-        return
-
-    if not ctx.voice_client:
-        embed = discord.Embed(
-            title="Fehler",
-            description="Ich bin in keinem Sprachkanal",
-            color=discord.Color.red() 
-        )
-        await ctx.send(embed=embed)
-        return
-
-    ctx.voice_client.volume = volume / 100
-    embed = discord.Embed(
-        title="Erfolg",
-        description=f"Lautstärke auf {volume}% gesetzt",
-        color=discord.Color.green()
-    )
-    await ctx.send(embed=embed) 
-
-@bot.command(name="nowplaying", help="Zeigt das aktuelle Lied an")
-async def nowplaying(ctx):
-    if not ctx.voice_client or not ctx.voice_client.is_playing():
-        embed = discord.Embed(
-            title="Fehler",
-            description="Es wird nichts abgespielt",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=embed)
-        return
-        
-    song = ctx.voice_client.current
-    embed = discord.Embed(
-        title="Aktuelles Lied",
-        description=f"[{song.title}]({song.web_url})",
-        color=discord.Color.green()
-    )
-    await ctx.send(embed=embed)
-
-@bot.command(name="help", help="Zeigt alle Befehle an")
-async def help(ctx):
-    embed = discord.Embed(
-        title="Hilfe",
-        description="Hier sind alle Befehle:",
+        title="⏸️ Pausiert",
+        description="Wiedergabe pausiert!",
         color=discord.Color.blue()
     )
-    embed.add_field(name="!join", value="Tritt deinem Sprachkanal bei", inline=False)
-    embed.add_field(name="!leave", value="Verlässt den Sprachkanal", inline=False)
-    embed.add_field(name="!play <url>", value="Spielt ein Lied von einer YouTube URL", inline=False)
-    embed.add_field(name="!stop", value="Stoppt die Wiedergabe und leert die Warteschlange", inline=False)
-    embed.add_field(name="!resume", value="Setzt die Wiedergabe fort", inline=False)
-    embed.add_field(name="!pause", value="Pausiert das aktuelle Lied", inline=False)
-    embed.add_field(name="!skip", value="Überspringt das aktuelle Lied", inline=False)  
-    embed.add_field(name="!queue", value="Zeigt die aktuelle Warteschlange", inline=False)
-    embed.add_field(name="!clear", value="Leert die Warteschlange", inline=False)
-
-@bot.command(name="update", help="Prüft auf Updates")
-async def check_update(ctx):
-    if check_for_updates():
-        embed = discord.Embed(
-            title="Update verfügbar!",
-            description=f"Eine neue Version ist verfügbar!\nAktuelle Version: {CURRENT_VERSION}\nBitte aktualisiere den Bot.",
-            color=discord.Color.blue()
-        )
-    else:
-        embed = discord.Embed(
-            title="Kein Update verfügbar",
-            description=f"Der Bot ist auf dem neuesten Stand (Version {CURRENT_VERSION})",
-            color=discord.Color.green()
-        )
     await ctx.send(embed=embed)
 
-@bot.command(name="toggleupdate", help="Aktiviert/Deaktiviert Auto-Updates")
-async def toggle_update(ctx):
-    global AUTO_UPDATE_ENABLED
-    AUTO_UPDATE_ENABLED = not AUTO_UPDATE_ENABLED
+@bot.command()
+async def resume(ctx):
+    if not ctx.voice_client or not ctx.voice_client.is_paused():
+        embed = discord.Embed(
+            title="❌ Fehler",
+            description="Es ist nichts pausiert!",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+        
+    ctx.voice_client.resume()
+    
     embed = discord.Embed(
-        title="Auto-Update Status",
-        description=f"Auto-Updates sind jetzt {'aktiviert' if AUTO_UPDATE_ENABLED else 'deaktiviert'}",
-        color=discord.Color.green()
+        title="▶️ Fortgesetzt",
+        description="Wiedergabe fortgesetzt!",
+        color=discord.Color.blue()
     )
     await ctx.send(embed=embed)
 
-bot.run(Token)
+@bot.command()
+async def leave(ctx):
+    if not ctx.voice_client:
+        embed = discord.Embed(
+            title="❌ Fehler",
+            description="Ich bin in keinem Sprachkanal!",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+        
+    await ctx.voice_client.disconnect()
+    if ctx.guild.id in queues:
+        del queues[ctx.guild.id]
+    
+    embed = discord.Embed(
+        title="👋 Auf Wiedersehen",
+        description="Auf Wiedersehen!",
+        color=discord.Color.blue()
+    )
+    await ctx.send(embed=embed)
+
+@bot.command(name='hilfe', aliases=['help'])
+async def hilfe(ctx):
+    embed = discord.Embed(
+        title="📖 Hilfe",
+        description="Hier sind alle verfügbaren Befehle:",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(
+        name="🎵 Musik-Befehle",
+        value="""
+        `!play <ID/URL>` - Spielt Musik ab
+        `!pause` - Pausiert die Wiedergabe
+        `!resume` - Setzt Wiedergabe fort
+        `!stop` - Stoppt die Wiedergabe
+        `!skip` - Überspringt aktuellen Song
+        `!volume <0-100>` - Ändert die Lautstärke
+        `!list` - Zeigt alle verfügbaren Songs
+        """,
+        inline=False
+    )
+    
+    embed.add_field(
+        name="⚙️ Allgemeine Befehle",
+        value="""
+        `!join` - Bot tritt Sprachkanal bei
+        `!leave` - Bot verlässt Sprachkanal
+        `!ping` - Zeigt Bot-Latenz
+        """,
+        inline=False
+    )
+    
+    embed.set_footer(text="Du kannst mich hier ändern - Bei Fragen wende dich an die Endwklerer Jonathan.T " , icon_url="https://avatars.githubusercontent.com/u/162313298?s=400&u=5de53beb974f47dad7373049900b80f0b211998f&v=4")
+    await ctx.send(embed=embed)
+
+# Starte den Bot
+bot.run('Bitte hier deinen Bot Token einfügen !')
