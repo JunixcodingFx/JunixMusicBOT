@@ -17,6 +17,7 @@ pip install -U ffmpeg-python
 pip install -U pynacl
 pip install -U python-dotenv
 pip install requests
+pip install PyNaCl 
 ````
 
 3. Stelle sicher, dass **FFmpeg** auf deinem System installiert ist:
